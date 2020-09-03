@@ -1116,9 +1116,6 @@ TEST_P(SocketInetLoopbackTest, TCPAcceptAfterReset) {
   TestAddress const& listener = param.listener;
   TestAddress const& connector = param.connector;
 
-  // TODO(gvisor.dev/issue/1400): Remove this after SO_LINGER is fixed.
-  SKIP_IF(IsRunningOnGvisor());
-
   // Create the listening socket.
   const FileDescriptor listen_fd = ASSERT_NO_ERRNO_AND_VALUE(
       Socket(listener.family(), SOCK_STREAM, IPPROTO_TCP));
@@ -1177,6 +1174,13 @@ TEST_P(SocketInetLoopbackTest, TCPAcceptAfterReset) {
   auto accept_fd = ASSERT_NO_ERRNO_AND_VALUE(Accept(
       listen_fd.get(), reinterpret_cast<sockaddr*>(&accept_addr), &addrlen));
   ASSERT_EQ(addrlen, listener.addr_len);
+
+  char buf[10];
+  ASSERT_THAT(ReadFd(accept_fd.get(), buf, sizeof(buf)),
+              SyscallFailsWithErrno(ECONNRESET));
+
+  // TODO(gvisor.dev/issue/3812): Remove after SO_ERROR is fixed.
+  SKIP_IF(IsRunningOnGvisor());
 
   int err;
   socklen_t optlen = sizeof(err);
