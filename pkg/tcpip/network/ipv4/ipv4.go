@@ -114,93 +114,19 @@ func (e *endpoint) NetworkProtocolNumber() tcpip.NetworkProtocolNumber {
 // pkt.TransportHeader may be set. mtu includes the IP header and options. This
 // does not support the DontFragment IP flag.
 func (e *endpoint) writePacketFragments(r *stack.Route, gso *stack.GSO, mtu int, pkt *stack.PacketBuffer) *tcpip.Error {
-	// This packet is too big, it needs to be fragmented.
-	ip := header.IPv4(pkt.NetworkHeader().View())
-	flags := ip.Flags()
+	pf := newPacketFragmenter(pkt, uint32(mtu))
 
-	// Update mtu to take into account the header, which will exist in all
-	// fragments anyway.
-	innerMTU := mtu - int(ip.HeaderLength())
-
-	// Round the MTU down to align to 8 bytes. Then calculate the number of
-	// fragments. Calculate fragment sizes as in RFC791.
-	innerMTU &^= 7
-	n := (int(ip.PayloadLength()) + innerMTU - 1) / innerMTU
-
-	outerMTU := innerMTU + int(ip.HeaderLength())
-	offset := ip.FragmentOffset()
-
-	// Keep the length reserved for link-layer, we need to create fragments with
-	// the same reserved length.
-	reservedForLink := pkt.AvailableHeaderBytes()
-
-	// Destroy the packet, pull all payloads out for fragmentation.
-	transHeader, data := pkt.TransportHeader().View(), pkt.Data
-
-	// Where possible, the first fragment that is sent has the same
-	// number of bytes reserved for header as the input packet. The link-layer
-	// endpoint may depend on this for looking at, eg, L4 headers.
-	transFitsFirst := len(transHeader) <= innerMTU
-
-	for i := 0; i < n; i++ {
-		reserve := reservedForLink + int(ip.HeaderLength())
-		if i == 0 && transFitsFirst {
-			// Reserve for transport header if it's going to be put in the first
-			// fragment.
-			reserve += len(transHeader)
+	for {
+		fragPkt := pf.buildNextFragment()
+		if fragPkt == nil {
+			break
 		}
-		fragPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			ReserveHeaderBytes: reserve,
-		})
-		fragPkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
-
-		// Copy data for the fragment.
-		avail := innerMTU
-
-		if n := len(transHeader); n > 0 {
-			if n > avail {
-				n = avail
-			}
-			if i == 0 && transFitsFirst {
-				copy(fragPkt.TransportHeader().Push(n), transHeader)
-			} else {
-				fragPkt.Data.AppendView(transHeader[:n:n])
-			}
-			transHeader = transHeader[n:]
-			avail -= n
-		}
-
-		if avail > 0 {
-			n := data.Size()
-			if n > avail {
-				n = avail
-			}
-			data.ReadToVV(&fragPkt.Data, n)
-			avail -= n
-		}
-
-		copied := uint16(innerMTU - avail)
-
-		// Set lengths in header and calculate checksum.
-		h := header.IPv4(fragPkt.NetworkHeader().Push(len(ip)))
-		copy(h, ip)
-		if i != n-1 {
-			h.SetTotalLength(uint16(outerMTU))
-			h.SetFlagsFragmentOffset(flags|header.IPv4FlagMoreFragments, offset)
-		} else {
-			h.SetTotalLength(uint16(h.HeaderLength()) + copied)
-			h.SetFlagsFragmentOffset(flags, offset)
-		}
-		h.SetChecksum(0)
-		h.SetChecksum(^h.CalculateChecksum())
-		offset += copied
-
-		// Send out the fragment.
 		if err := e.linkEP.WritePacket(r, gso, ProtocolNumber, fragPkt); err != nil {
 			return err
 		}
 		r.Stats().IP.PacketsSent.Increment()
 	}
+
 	return nil
 }
 
@@ -597,4 +523,38 @@ func NewProtocol() stack.NetworkProtocol {
 		defaultTTL:    DefaultTTL,
 		fragmentation: fragmentation.NewFragmentation(fragmentblockSize, fragmentation.HighFragThreshold, fragmentation.LowFragThreshold, fragmentation.DefaultReassembleTimeout),
 	}
+}
+
+type packetFragmenter struct {
+	fragmentation.PacketFragmenterBase
+	networkHeader buffer.View
+}
+
+func newPacketFragmenter(pkt *stack.PacketBuffer, mtu uint32) packetFragmenter {
+	return packetFragmenter{
+		PacketFragmenterBase: fragmentation.NewPacketFragmenterBase(pkt, mtu, 0),
+		networkHeader:        pkt.NetworkHeader().View(),
+	}
+}
+
+func (pf *packetFragmenter) buildNextFragment() *stack.PacketBuffer {
+	fragPkt, offset, copied, more := pf.BuildNextFragment(header.IPv4ProtocolNumber)
+	if fragPkt == nil {
+		return nil
+	}
+
+	originalIPHeader := header.IPv4(pf.networkHeader)
+	nextFragIPHeader := header.IPv4(fragPkt.NetworkHeader().Push(len(originalIPHeader)))
+	copy(nextFragIPHeader, originalIPHeader)
+
+	flags := originalIPHeader.Flags()
+	if more {
+		flags |= header.IPv4FlagMoreFragments
+	}
+	nextFragIPHeader.SetFlagsFragmentOffset(flags, offset)
+	nextFragIPHeader.SetTotalLength(uint16(nextFragIPHeader.HeaderLength()) + copied)
+	nextFragIPHeader.SetChecksum(0)
+	nextFragIPHeader.SetChecksum(^nextFragIPHeader.CalculateChecksum())
+
+	return fragPkt
 }
