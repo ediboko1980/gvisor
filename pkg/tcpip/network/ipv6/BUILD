@@ -33,7 +33,6 @@ go_test(
         "//pkg/tcpip/checker",
         "//pkg/tcpip/header",
         "//pkg/tcpip/link/channel",
-        "//pkg/tcpip/link/sniffer",
         "//pkg/tcpip/stack",
         "//pkg/tcpip/transport/icmp",
         "//pkg/tcpip/transport/udp",

@@ -24,7 +24,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
-	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -435,9 +434,6 @@ func newTestContext(t *testing.T) *testContext {
 	c.linkEP0 = channel.New(defaultChannelSize, defaultMTU, linkAddr0)
 
 	wrappedEP0 := stack.LinkEndpoint(endpointWithResolutionCapability{LinkEndpoint: c.linkEP0})
-	if testing.Verbose() {
-		wrappedEP0 = sniffer.New(wrappedEP0)
-	}
 	if err := c.s0.CreateNIC(nicID, wrappedEP0); err != nil {
 		t.Fatalf("CreateNIC s0: %v", err)
 	}

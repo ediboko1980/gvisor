@@ -32,6 +32,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/nested"
+	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -200,44 +203,55 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 	var fragmentOffset uint16
 	var moreFragments bool
 
-	// Examine the packet using a new VV. Backing storage must not be written.
-	vv := buffer.NewVectorisedView(pkt.Size(), pkt.Views())
-
+	// Clone pkt to not modify the original pkt.
+	pkt = stack.NewPacketBuffer(stack.PacketBufferOptions{Data: buffer.NewVectorisedView(pkt.Size(), pkt.Views())})
 	switch protocol {
 	case header.IPv4ProtocolNumber:
-		hdr, ok := vv.PullUp(header.IPv4MinimumSize)
-		if !ok {
+		p := ipv4.NewProtocol()
+		if _, _, ok := p.Parse(pkt); !ok {
 			return
 		}
-		ipv4 := header.IPv4(hdr)
+
+		ipv4 := header.IPv4(pkt.NetworkHeader().View())
 		fragmentOffset = ipv4.FragmentOffset()
 		moreFragments = ipv4.Flags()&header.IPv4FlagMoreFragments == header.IPv4FlagMoreFragments
 		src = ipv4.SourceAddress()
 		dst = ipv4.DestinationAddress()
 		transProto = ipv4.Protocol()
 		size = ipv4.TotalLength() - uint16(ipv4.HeaderLength())
-		vv.TrimFront(int(ipv4.HeaderLength()))
 		id = int(ipv4.ID())
 
 	case header.IPv6ProtocolNumber:
-		hdr, ok := vv.PullUp(header.IPv6MinimumSize)
+		p := ipv6.NewProtocol()
+		proto, hasTransportHdr, ok := p.Parse(pkt)
 		if !ok {
 			return
 		}
-		ipv6 := header.IPv6(hdr)
+
+		ipv6 := header.IPv6(pkt.NetworkHeader().View())
 		src = ipv6.SourceAddress()
 		dst = ipv6.DestinationAddress()
-		transProto = ipv6.NextHeader()
+		transProto = uint8(proto)
 		size = ipv6.PayloadLength()
-		vv.TrimFront(header.IPv6MinimumSize)
 
-	case header.ARPProtocolNumber:
-		hdr, ok := vv.PullUp(header.ARPSize)
-		if !ok {
+		if hasTransportHdr {
+			log.Infof(
+				"%s ipv6 %s -> %s fragment w/ next header = %d",
+				prefix,
+				src,
+				dst,
+				transProto,
+			)
 			return
 		}
-		vv.TrimFront(header.ARPSize)
-		arp := header.ARP(hdr)
+
+	case header.ARPProtocolNumber:
+		p := arp.NewProtocol()
+		if _, _, ok := p.Parse(pkt); !ok {
+			return
+		}
+
+		arp := header.ARP(pkt.NetworkHeader().View())
 		log.Infof(
 			"%s arp %s (%s) -> %s (%s) valid:%t",
 			prefix,
@@ -259,7 +273,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 	switch tcpip.TransportProtocolNumber(transProto) {
 	case header.ICMPv4ProtocolNumber:
 		transName = "icmp"
-		hdr, ok := vv.PullUp(header.ICMPv4MinimumSize)
+		hdr, ok := pkt.Data.PullUp(header.ICMPv4MinimumSize)
 		if !ok {
 			break
 		}
@@ -296,7 +310,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 
 	case header.ICMPv6ProtocolNumber:
 		transName = "icmp"
-		hdr, ok := vv.PullUp(header.ICMPv6MinimumSize)
+		hdr, ok := pkt.Data.PullUp(header.ICMPv6MinimumSize)
 		if !ok {
 			break
 		}
@@ -331,7 +345,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 
 	case header.UDPProtocolNumber:
 		transName = "udp"
-		hdr, ok := vv.PullUp(header.UDPMinimumSize)
+		hdr, ok := pkt.Data.PullUp(header.UDPMinimumSize)
 		if !ok {
 			break
 		}
@@ -345,7 +359,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 
 	case header.TCPProtocolNumber:
 		transName = "tcp"
-		hdr, ok := vv.PullUp(header.TCPMinimumSize)
+		hdr, ok := pkt.Data.PullUp(header.TCPMinimumSize)
 		if !ok {
 			break
 		}
@@ -356,8 +370,8 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 				details += fmt.Sprintf("invalid packet: tcp data offset too small %d", offset)
 				break
 			}
-			if offset > vv.Size() && !moreFragments {
-				details += fmt.Sprintf("invalid packet: tcp data offset %d larger than packet buffer length %d", offset, vv.Size())
+			if offset > pkt.Data.Size() && !moreFragments {
+				details += fmt.Sprintf("invalid packet: tcp data offset %d larger than packet buffer length %d", offset, pkt.Data.Size())
 				break
 			}
 
