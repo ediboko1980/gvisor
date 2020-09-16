@@ -181,12 +181,17 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 	containerTestbenchBinary := filepath.Join("/packetimpact", tbb)
 	testbench.CopyFiles(&runOpts, "/packetimpact", filepath.Join("test/packetimpact/tests", tbb))
 
+	// sniffNetDev is a network device in the linux container that we will run
+	// sniffer (tcpdump or tshark) on and inject traffic to, not to be confused
+	// with testNetDev which is on the DUT. The DUT is not always Linux, it can
+	// be a Fuchsia device.
+	const sniffNetDev = "eth2"
 	// Run tcpdump in the test bench unbuffered, without DNS resolution, just on
 	// the interface with the test packets.
 	snifferArgs := []string{
 		"tcpdump",
 		"-S", "-vvv", "-U", "-n",
-		"-i", testNetDev,
+		"-i", sniffNetDev,
 		"-w", testOutputDir + "/dump.pcap",
 	}
 	snifferRegex := "tcpdump: listening.*\n"
@@ -194,7 +199,7 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 		// Run tshark in the test bench unbuffered, without DNS resolution, just on
 		// the interface with the test packets.
 		snifferArgs = []string{
-			"tshark", "-V", "-l", "-n", "-i", testNetDev,
+			"tshark", "-V", "-l", "-n", "-i", sniffNetDev,
 			"-o", "tcp.check_checksum:TRUE",
 			"-o", "udp.check_checksum:TRUE",
 		}
@@ -228,7 +233,7 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 	// this, we can install the following iptables rules. The raw socket that
 	// packetimpact tests use will still be able to see everything.
 	for _, bin := range []string{"iptables", "ip6tables"} {
-		if logs, err := testbench.Exec(ctx, dockerutil.ExecOpts{}, bin, "-A", "INPUT", "-i", testNetDev, "-p", "tcp", "-j", "DROP"); err != nil {
+		if logs, err := testbench.Exec(ctx, dockerutil.ExecOpts{}, bin, "-A", "INPUT", "-i", sniffNetDev, "-p", "tcp", "-j", "DROP"); err != nil {
 			t.Fatalf("unable to Exec %s on container %s: %s, logs from testbench:\n%s", bin, testbench.Name, err, logs)
 		}
 	}
@@ -251,7 +256,8 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 		"--remote_ipv6", remoteIPv6.String(),
 		"--remote_mac", remoteMAC.String(),
 		"--remote_interface_id", fmt.Sprintf("%d", dutDeviceID),
-		"--device", testNetDev,
+		"--inject_device", sniffNetDev,
+		"--dut_device", testNetDev,
 		fmt.Sprintf("--native=%t", native),
 	)
 	testbenchLogs, err := testbench.Exec(ctx, dockerutil.ExecOpts{}, testArgs...)
