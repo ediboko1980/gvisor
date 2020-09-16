@@ -26,6 +26,7 @@ go_library(
     deps = [
         "//pkg/abi",
         "//pkg/abi/linux",
+        "//pkg/cleanup",
         "//pkg/context",
         "//pkg/control/server",
         "//pkg/cpuid",
