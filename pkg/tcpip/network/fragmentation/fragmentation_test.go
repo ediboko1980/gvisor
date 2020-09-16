@@ -135,8 +135,14 @@ func TestReassemblingTimeout(t *testing.T) {
 	f := NewFragmentation(minBlockSize, 1024, 512, timeout)
 	// Send first fragment with id = 0, first = 0, last = 0, and more = true.
 	f.Process(FragmentID{}, 0, 0, true, 0xFF, vv(1, "0"))
+	if got, want := f.size, 1; got != want {
+		t.Errorf("Wrong size: got=%d want=%d", got, want)
+	}
 	// Sleep more than the timeout.
-	time.Sleep(2 * timeout)
+	time.Sleep(5 * timeout)
+	if got, want := f.size, 0; got != want {
+		t.Errorf("Wrong size: got=%d want=%d", got, want)
+	}
 	// Send another fragment that completes a packet.
 	// However, no packet should be reassembled because the fragment arrived after the timeout.
 	_, _, done, err := f.Process(FragmentID{}, 1, 1, false, 0xFF, vv(1, "1"))

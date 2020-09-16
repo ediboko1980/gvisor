@@ -73,14 +73,16 @@ type FragmentID struct {
 // Fragmentation is the main structure that other modules
 // of the stack should use to implement IP Fragmentation.
 type Fragmentation struct {
-	mu           sync.Mutex
-	highLimit    int
-	lowLimit     int
-	reassemblers map[FragmentID]*reassembler
-	rList        reassemblerList
-	size         int
-	timeout      time.Duration
-	blockSize    uint16
+	mu                  sync.Mutex
+	highLimit           int
+	lowLimit            int
+	reassemblers        map[FragmentID]*reassembler
+	rList               reassemblerList
+	size                int
+	timeout             time.Duration
+	blockSize           uint16
+	releaseJob          *tcpip.Job
+	releaseJobScheduled bool
 }
 
 // NewFragmentation creates a new Fragmentation.
@@ -110,13 +112,18 @@ func NewFragmentation(blockSize uint16, highMemoryLimit, lowMemoryLimit int, rea
 		blockSize = minBlockSize
 	}
 
-	return &Fragmentation{
+	f := &Fragmentation{
 		reassemblers: make(map[FragmentID]*reassembler),
 		highLimit:    highMemoryLimit,
 		lowLimit:     lowMemoryLimit,
 		timeout:      reassemblingTimeout,
 		blockSize:    blockSize,
 	}
+	f.releaseJob = tcpip.NewJob(&tcpip.StdClock{}, &f.mu, func() {
+		f.releaseReassemblers()
+	})
+
+	return f
 }
 
 // Process processes an incoming fragment belonging to an ID and returns a
@@ -155,15 +162,13 @@ func (f *Fragmentation) Process(
 
 	f.mu.Lock()
 	r, ok := f.reassemblers[id]
-	if ok && r.tooOld(f.timeout) {
-		// This is very likely to be an id-collision or someone performing a slow-rate attack.
-		f.release(r)
-		ok = false
-	}
 	if !ok {
 		r = newReassembler(id)
 		f.reassemblers[id] = r
 		f.rList.PushFront(r)
+		if !f.releaseJobScheduled {
+			f.releaseReassemblers()
+		}
 	}
 	f.mu.Unlock()
 
@@ -209,5 +214,21 @@ func (f *Fragmentation) release(r *reassembler) {
 	if f.size < 0 {
 		log.Printf("memory counter < 0 (%d), this is an accounting bug that requires investigation", f.size)
 		f.size = 0
+	}
+}
+
+// releaseReassemblers releases all expired reassemblers then schedules the job
+// to call back itself for the rest of reassemblers (if any) in the future. This
+// function must be called with f.mu locked.
+func (f *Fragmentation) releaseReassemblers() {
+	f.releaseJobScheduled = false
+	for r := f.rList.Back(); r != nil; r = f.rList.Back() {
+		elapsed := time.Now().Sub(r.creationTime)
+		if f.timeout > elapsed {
+			f.releaseJob.Schedule(f.timeout - elapsed)
+			f.releaseJobScheduled = true
+			break
+		}
+		f.release(r)
 	}
 }
